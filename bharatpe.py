@@ -35,14 +35,14 @@ def fetch_transactions() -> list:
 
         if data.get("status") and data.get("message") == "SUCCESS":
             txns = data.get("data", {}).get("transactions", [])
-            logger.debug(f"Fetched {len(txns)} transactions from BharatPe")
+            logger.info(f"BharatPe: {len(txns)} transactions fetched")
             return txns
 
-        logger.warning(f"BharatPe API error: {data.get('message')}")
+        logger.warning(f"BharatPe API error: {data.get('message')} | HTTP {resp.status_code}")
         return []
 
     except requests.RequestException as e:
-        logger.error(f"BharatPe API request failed: {e}")
+        logger.error(f"BharatPe API failed: {e}")
         return []
 
 

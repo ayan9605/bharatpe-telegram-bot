@@ -6,7 +6,7 @@ import os
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 # ── Admin ──────────────────────────────────────────────
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "2089273221").split(",") if x.strip()]
 
 # ── BharatPe ───────────────────────────────────────────
 MERCHANT_ID = os.getenv("MERCHANT_ID", "30549438")

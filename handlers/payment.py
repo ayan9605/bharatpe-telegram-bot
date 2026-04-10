@@ -167,13 +167,19 @@ async def _start_payment(message, ctx: ContextTypes.DEFAULT_TYPE, amount: float)
 
     # ── Poll loop ──────────────────────────────────────
     elapsed = 0
+    poll_count = 0
+    log.info(f"POLL START | {order_id} | ₹{session_amount} | checking every {POLL_INTERVAL}s for {TIMEOUT}s")
+
     while elapsed < TIMEOUT:
         await asyncio.sleep(POLL_INTERVAL)
         elapsed += POLL_INTERVAL
+        poll_count += 1
 
         if s.status != "PENDING":
+            log.info(f"POLL STOP | {order_id} | cancelled by user")
             break
 
+        log.info(f"POLL {poll_count} | {order_id} | {elapsed}s/{TIMEOUT}s | checking BharatPe...")
         match = find_payment(s.amount, s.created_at, s.expire_at)
         if match:
             s.status = "SUCCESS"
