@@ -1,23 +1,10 @@
 """
-Pay0 Telegram Payment Bot — Entry Point
-
-Structure:
-  bot.py              ← you are here
-  config.py           ← env-based configuration
-  database.py         ← PostgreSQL layer
-  bharatpe.py         ← BharatPe transaction API
-  qr_generator.py     ← branded UPI QR codes
-  session.py          ← session helpers
-  handlers/
-    __init__.py       ← handler registration
-    keyboards.py      ← shared keyboard layouts
-    middleware.py      ← auth, rate limit, user tracking
-    member.py         ← /start, history, stats, help
-    payment.py        ← /pay, QR flow, polling
-    admin.py          ← /admin, dashboard, members, broadcast
+Pay0 Telegram Payment Bot — Entry Point (with FastAPI wrapper)
 """
 
 import logging
+import threading
+from fastapi import FastAPI
 from telegram.ext import Application
 from config import BOT_TOKEN, MERCHANT_NAME
 from database import init_db
@@ -29,7 +16,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("pay0bot")
 
-
+# ---- EXISTING LOGIC (UNCHANGED) ----
 def main():
     init_db()
 
@@ -43,5 +30,27 @@ def main():
     app.run_polling()
 
 
-if __name__ == "__main__":
+# ---- FASTAPI WRAPPER ----
+api = FastAPI()
+
+
+@api.get("/")
+def root():
+    return {"status": "Pay0 bot is running"}
+
+
+@api.get("/health")
+def health():
+    return {"ok": True}
+
+
+def start_bot():
+    """Run bot in a separate thread"""
     main()
+
+
+@api.on_event("startup")
+def startup_event():
+    thread = threading.Thread(target=start_bot)
+    thread.daemon = True
+    thread.start()
