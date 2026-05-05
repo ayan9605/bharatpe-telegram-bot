@@ -1,4 +1,4 @@
- """
+"""
 UPI QR Code Generator — creates branded QR images for Telegram.
 """
 
