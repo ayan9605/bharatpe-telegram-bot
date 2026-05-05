@@ -1,9 +1,13 @@
-"""Payment handler — full pay flow with QR, polling, and result."""
+"""
+Payment handler — full pay flow with QR, polling, and result.
+"""
 
 import asyncio
 import time
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+
 from telegram import Update
 from telegram.ext import CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
@@ -20,8 +24,12 @@ from .middleware import track_user, check_blocked, check_rate_limit
 log = logging.getLogger(__name__)
 
 
+# ✅ helper for safe rounding
+def normalize(val: float) -> float:
+    return float(Decimal(val).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 class ActiveSession:
-    """Lightweight in-memory session for the polling loop."""
     __slots__ = ("order_id", "amount", "created_at", "expire_at", "status", "chat_id")
 
     def __init__(self, order_id, amount, chat_id):
@@ -37,11 +45,16 @@ def _make_order_id(amount: float) -> str:
     return f"TG{int(time.time())}{int(amount * 100):05d}"
 
 
+# ✅ UPDATED DECIMAL LOGIC (₹x.01 → ₹x.10 ONLY)
 def _find_free_amount(base: float) -> float | None:
-    for i in range(100):
-        candidate = round(base + 0.01 * i, 2)
+    base = normalize(base)
+
+    for i in range(1, 11):  # 1 → 10
+        candidate = normalize(base + (i / 100))
+
         if not is_amount_in_use(candidate):
             return candidate
+
     return None
 
 
@@ -83,7 +96,6 @@ async def on_pay_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("❌ Payment cancelled.", reply_markup=result_kb(q.from_user.id))
 
     else:
-        # Quick amount
         if await check_blocked(update):
             return
         await _start_payment(q.message, ctx, float(action))
@@ -93,7 +105,7 @@ async def on_pay_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_amount_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("input") != "pay_amount":
-        return  # Not waiting for amount
+        return
 
     ctx.user_data.pop("input", None)
     text = update.message.text.strip().replace("₹", "").replace(",", "")
@@ -101,7 +113,7 @@ async def on_amount_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(text)
     except ValueError:
-        await update.message.reply_text("❌ Enter a valid number. Example: `100`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Enter a valid number. Example: 100")
         return
 
     await _start_payment(update.message, ctx, amount)
@@ -111,6 +123,7 @@ async def on_amount_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _start_payment(message, ctx: ContextTypes.DEFAULT_TYPE, amount: float):
     uid = message.chat_id
+    amount = normalize(amount)
 
     # Validate
     if amount < MIN_AMOUNT:
@@ -126,16 +139,16 @@ async def _start_payment(message, ctx: ContextTypes.DEFAULT_TYPE, amount: float)
         await message.reply_text(err)
         return
 
-    # Cleanup stale
     expire_stale()
 
-    # Find unique amount
+    # ✅ use updated decimal logic
     session_amount = _find_free_amount(amount)
     if session_amount is None:
-        await message.reply_text("⚠️ Too many concurrent payments. Wait a moment.", reply_markup=result_kb(uid))
+        await message.reply_text("⚠️ Too many concurrent payments. Try again shortly.", reply_markup=result_kb(uid))
         return
 
-    # Create session
+    session_amount = normalize(session_amount)
+
     order_id = _make_order_id(amount)
     expire_at = datetime.now() + timedelta(seconds=TIMEOUT)
 
@@ -145,101 +158,83 @@ async def _start_payment(message, ctx: ContextTypes.DEFAULT_TYPE, amount: float)
     log.info(f"NEW | {order_id} | ₹{session_amount} | chat={uid}")
     log_activity(uid, "payment_start", f"{order_id} ₹{session_amount}")
 
-    # Generate QR
+    # QR
     qr_buf = make_qr(session_amount, order_id)
 
-    # Send QR
     qr_msg = await message.reply_photo(
         photo=qr_buf,
         caption=(
-            f"💳 *Pay ₹{session_amount:.2f}*\n\n"
+            f"💳 Pay ₹{session_amount:.2f}\n\n"
             f"📱 Scan with any UPI app\n"
-            f"⚠️ Pay exactly *₹{session_amount:.2f}*\n"
+            f"⚠️ Pay exactly ₹{session_amount:.2f}\n"
             f"⏱ {TIMEOUT // 60} min timeout\n\n"
             f"🔄 Verifying..."
         ),
         reply_markup=waiting_kb(),
-        parse_mode="Markdown",
     )
 
-    # Save to DB (with message_id for later edit)
     insert_payment(order_id, uid, amount, session_amount, expire_at, qr_msg.message_id)
 
     # ── Poll loop ──────────────────────────────────────
     elapsed = 0
-    poll_count = 0
-    log.info(f"POLL START | {order_id} | ₹{session_amount} | checking every {POLL_INTERVAL}s for {TIMEOUT}s")
 
     while elapsed < TIMEOUT:
         await asyncio.sleep(POLL_INTERVAL)
         elapsed += POLL_INTERVAL
-        poll_count += 1
 
         if s.status != "PENDING":
-            log.info(f"POLL STOP | {order_id} | cancelled by user")
             break
 
-        log.info(f"POLL {poll_count} | {order_id} | {elapsed}s/{TIMEOUT}s | checking BharatPe...")
-        match = find_payment(s.amount, s.created_at, s.expire_at)
+        match = find_payment(normalize(s.amount), s.created_at, s.expire_at)
+
         if match:
             s.status = "SUCCESS"
             complete_payment(order_id, match["utr"], match.get("vpa", ""))
             log_activity(uid, "payment_success", f"{order_id} UTR={match['utr']}")
 
-            # Update QR caption
             try:
                 await qr_msg.edit_caption(
-                    caption=f"💳 ₹{s.amount:.2f}\n\n✅ *Payment Verified*",
-                    parse_mode="Markdown",
+                    caption=f"💳 ₹{s.amount:.2f}\n\n✅ Payment Verified"
                 )
             except Exception:
                 pass
 
-            # Success message
             await qr_msg.reply_text(
-                f"✅ *Payment Successful!*\n\n"
-                f"💰 Amount: *₹{match['amount']:.2f}*\n"
-                f"🔗 UTR: `{match['utr']}`\n"
+                f"✅ Payment Successful!\n\n"
+                f"💰 Amount: ₹{match['amount']:.2f}\n"
+                f"🔗 UTR: {match['utr']}\n"
                 f"👤 From: {match.get('vpa') or 'N/A'}\n"
                 f"🕐 {match['timestamp']}\n"
-                f"📝 `{order_id}`",
+                f"📝 {order_id}",
                 reply_markup=result_kb(uid),
-                parse_mode="Markdown",
             )
 
-            log.info(f"OK  | {order_id} | UTR={match['utr']}")
             ctx.user_data.pop("active_order", None)
             return
 
     # ── Expired ────────────────────────────────────────
     if s.status == "PENDING":
-        s.status = "FAILURE"
         fail_payment(order_id)
         log_activity(uid, "payment_expired", order_id)
 
     try:
         await qr_msg.edit_caption(
-            caption=f"💳 ₹{s.amount:.2f}\n\n❌ *Expired*",
-            parse_mode="Markdown",
+            caption=f"💳 ₹{s.amount:.2f}\n\n❌ Expired"
         )
     except Exception:
         pass
 
     await qr_msg.reply_text(
-        f"❌ *Payment Expired*\n\n"
+        f"❌ Payment Expired\n\n"
         f"No payment received in {TIMEOUT // 60} min.\n"
-        f"Order: `{order_id}`",
+        f"Order: {order_id}",
         reply_markup=result_kb(uid),
-        parse_mode="Markdown",
     )
 
-    log.info(f"EXP | {order_id}")
     ctx.user_data.pop("active_order", None)
 
 
 def register_payment_handlers(app):
     app.add_handler(CommandHandler("pay", cmd_pay))
     app.add_handler(CallbackQueryHandler(on_pay_button, pattern=r"^pay:"))
-    # This handler only fires when user is in "pay_amount" input mode
-    # It's added with a lower group so it doesn't eat other text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_amount_text), group=1)
