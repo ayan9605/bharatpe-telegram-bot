@@ -4,25 +4,43 @@ UPI QR Code Generator — creates branded QR images for Telegram.
 
 import io
 import qrcode
+import hashlib
 from PIL import Image, ImageDraw, ImageFont
 from urllib.parse import quote
 from config import UPI_ID, MERCHANT_NAME
 
 
+def generate_unique_amount(base_amount: float, order_id: str) -> float:
+    """
+    Add deterministic decimal (0.01–0.99) based on order_id
+    """
+    h = hashlib.md5(order_id.encode()).hexdigest()
+    unique_part = (int(h[:4], 16) % 99) + 1  # ensures 1–99
+    return base_amount + (unique_part / 100)
+
+
 def make_qr(amount: float, order_id: str) -> io.BytesIO:
     """Generate a branded UPI QR code PNG."""
+
+    # ✅ Generate unique amount
+    unique_amount = generate_unique_amount(amount, order_id)
 
     # Build UPI deep link
     upi_uri = (
         f"upi://pay?"
         f"pa={quote(UPI_ID)}"
-        f"&am={amount:.2f}"
+        f"&am={unique_amount:.2f}"
         f"&pn={quote(MERCHANT_NAME)}"
         f"&tn={quote(order_id)}"
     )
 
     # Generate QR
-    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=8, border=2)
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=8,
+        border=2
+    )
     qr.add_data(upi_uri)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="#1a1a2e", back_color="#ffffff").convert("RGB")
@@ -41,7 +59,7 @@ def make_qr(amount: float, order_id: str) -> io.BytesIO:
     # Top bar (dark)
     draw.rectangle([(0, 0), (card_w, top_bar)], fill="#1a1a2e")
 
-    # Try to use a nice font, fallback to default
+    # Fonts
     try:
         font_title = ImageFont.truetype("arial.ttf", 18)
         font_amount = ImageFont.truetype("arialbd.ttf", 20)
@@ -54,8 +72,8 @@ def make_qr(amount: float, order_id: str) -> io.BytesIO:
     # Brand name
     draw.text((pad, 16), MERCHANT_NAME, fill="#ffffff", font=font_title)
 
-    # Amount on right
-    amt_text = f"₹{amount:.2f}"
+    # ✅ Use unique amount for display
+    amt_text = f"₹{unique_amount:.2f}"
     bbox = draw.textbbox((0, 0), amt_text, font=font_amount)
     amt_w = bbox[2] - bbox[0]
     draw.text((card_w - pad - amt_w, 14), amt_text, fill="#ffffff", font=font_amount)
@@ -64,11 +82,22 @@ def make_qr(amount: float, order_id: str) -> io.BytesIO:
     card.paste(qr_img, (pad, top_bar + pad // 2))
 
     # Bottom text
-    draw.text((pad, card_h - bottom_bar + 12), f"Order: {order_id}", fill="#999999", font=font_small)
+    draw.text(
+        (pad, card_h - bottom_bar + 12),
+        f"Order: {order_id}",
+        fill="#999999",
+        font=font_small
+    )
+
     scan_text = "Scan with any UPI app"
     bbox2 = draw.textbbox((0, 0), scan_text, font=font_small)
     scan_w = bbox2[2] - bbox2[0]
-    draw.text((card_w - pad - scan_w, card_h - bottom_bar + 12), scan_text, fill="#999999", font=font_small)
+    draw.text(
+        (card_w - pad - scan_w, card_h - bottom_bar + 12),
+        scan_text,
+        fill="#999999",
+        font=font_small
+    )
 
     # Save
     buf = io.BytesIO()
